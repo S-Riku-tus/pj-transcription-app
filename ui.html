@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"/>
+  <title>Gemini Transcription Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <!-- Markdownパーサ & XSS対策 -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" crossorigin="anonymous"></script>
+  <style>
+    :root { --gap: 16px; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+      margin: 0; padding: 24px; background: #f7f7f8;
+    }
+    h1 { margin: 0 0 16px; font-size: 20px; }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) 2fr; /* 左1 右2 */
+      gap: var(--gap);
+      height: calc(100vh - 48px); /* 画面高さから上下余白を引いて固定 */
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.04);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .card-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid #f1f5f9;
+      background: #fafafa;
+      font-weight: 700;
+    }
+    .card-body {
+      padding: 16px;
+      overflow: auto;      /* ← スクロール */
+      flex: 1 1 auto;      /* ← 固定高さの中で伸縮 */
+    }
+    label { display:block; margin: 10px 0 6px; font-weight: 600; }
+    input[type="file"], textarea, input[type="text"] {
+      width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; background:#fff;
+    }
+    textarea { min-height: 120px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    button {
+      padding: 10px 16px; border: none; border-radius: 10px; background: #111827; color: white; font-weight: 600; cursor: pointer;
+    }
+    button:hover { opacity: .92; }
+    .hint { color: #6b7280; font-size: 12px; margin-top: 4px; }
+
+    /* 出力レンダリング領域（Markdown用） */
+    .result { line-height: 1.6; }
+    .result h2, .result h3 { margin: 0.8em 0 0.4em; }
+    .result ul { padding-left: 1.2em; }
+    .result code, .result pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .result pre { padding: 10px; background: #fbfbfb; border: 1px solid #eee; border-radius: 6px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Google AI Studio (Gemini) 文字起こし</h1>
+
+  <div class="grid">
+    <!-- 左：設定 -->
+    <div class="card">
+      <div class="card-header">設定</div>
+      <div class="card-body">
+        <form id="form" method="post" enctype="multipart/form-data" action="/transcribe">
+          <label>音声/動画ファイル</label>
+          <input name="file" type="file" accept=".mp3,.wav,.m4a,.mp4,.mov,.webm,.mkv,.aac,.flac,.ogg" required />
+
+          <label>プロンプト（任意）</label>
+          <textarea name="prompt" rows="5" placeholder="整形・要約・言語指定などがあれば書いてください。未指定はデフォルト。"></textarea>
+          <div class="hint">※ 面接官の質問のみ抽出するテンプレをデフォルト設定済み</div>
+
+          <div class="row">
+            <div>
+              <label>モデル（任意）</label>
+              <input name="model" type="text" placeholder="例: gemini-2.5-pro" />
+            </div>
+            <div>
+              <label>&nbsp;</label>
+              <button type="submit" id="submitBtn">文字起こしする</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 右：結果 -->
+    <div class="card">
+      <div class="card-header">結果</div>
+      <div class="card-body">
+        <div id="out" class="result">
+          <p>ここに文字起こし結果（Markdown）が表示されます。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('form');
+    const out  = document.getElementById('out');
+    const btn  = document.getElementById('submitBtn');
+
+    // Markdown → 安全なHTML
+    function renderMarkdown(md) {
+      marked.setOptions({ breaks: true });       // 1行改行を <br> 扱い
+      const html = marked.parse(md || '');
+      return DOMPurify.sanitize(html);           // XSS対策
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      btn.textContent = '処理中...';
+      out.innerHTML = '<p>処理中...</p>';
+
+      try {
+        const fd  = new FormData(form);
+        const res = await fetch('/transcribe', { method: 'POST', body: fd });
+        const txt = await res.text();
+
+        if (!res.ok) {
+          // サーバエラーはそのままテキスト表示
+          out.innerHTML = `<pre>${DOMPurify.sanitize(txt)}</pre>`;
+          return;
+        }
+        // MarkdownをHTMLにして表示
+        out.innerHTML = renderMarkdown(txt);
+      } catch (err) {
+        out.innerHTML = `<pre>${DOMPurify.sanitize(String(err))}</pre>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '文字起こしする';
+      }
+    });
+  </script>
+</body>
+</html>

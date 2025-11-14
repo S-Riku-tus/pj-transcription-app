@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Google AI Studio (Gemini API) で音声/動画を文字起こし（CLI + Web）
-- 動画は ffmpeg で音声抽出（m4a/mono/16kHz/64kbps）
-- 出力は ./outputs/ に保存（音声: ./outputs/audio, テキスト: ./outputs/transcripts）
-- UI は ./web/index.html に分離（左右2カラム: 左=設定フォーム, 右=結果パネル）
+Google AI Studio (Gemini API) で音声/動画を文字起こし（CLI + 簡易Web）
+- 動画入力は ffmpeg で音声抽出してから送信（m4a/mono/16kHz/64kbps）
+- 出力はスクリプト直下の ./outputs/ に保存（音声: ./outputs/audio, テキスト: ./outputs/transcripts）
 
 CLI:
   python transcribe_app.py --file "C:\\path\\to\\input.mp4" --audio-first
+  # 文字起こしは ./outputs/transcripts/<元ファイル名>.txt に保存
+
 Web:
   uvicorn transcribe_app:app --host 127.0.0.1 --port 8000 --reload
-"""
+  http://127.0.0.1:8000 からアップロード可能（UIは ui.html）
 
+.env（プロジェクト直下 or スクリプトと同じ場所）:
+  GOOGLE_API_KEY=xxxxx   # または GEMINI_API_KEY=xxxxx
+  # もし ffmpeg を PATH で拾えない場合は、以下を設定
+  # FFMPEG_BIN=C:\\tools\\ffmpeg\\bin\\ffmpeg.exe
+"""
 import os
 import io
 import re
@@ -23,7 +29,7 @@ import subprocess
 from typing import Optional, Tuple
 from pathlib import Path
 
-# ---------- .env ----------
+# ---------- .env ロード ----------
 def _load_env():
     paths = [Path(__file__).with_name(".env"), Path.cwd() / ".env"]
     try:
@@ -56,35 +62,53 @@ logger = logging.getLogger("transcribe")
 
 # ---------- FastAPI ----------
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import PlainTextResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 # ---------- google-genai ----------
 from google import genai
 from google.genai import types          # enums & config
 from google.genai.errors import ServerError
 
-# ---------- 出力ディレクトリ ----------
+# ---------- 出力ディレクトリ（スクリプト配下） ----------
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUT_ROOT  = SCRIPT_DIR / "outputs"
+OUT_ROOT = SCRIPT_DIR / "outputs"
 AUDIO_DIR = OUT_ROOT / "audio"
 TRANS_DIR = OUT_ROOT / "transcripts"
 for d in (AUDIO_DIR, TRANS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# ---------- Web(静的)ディレクトリ ----------
-WEB_DIR = SCRIPT_DIR / "web"
-WEB_DIR.mkdir(parents=True, exist_ok=True)  # ない場合も作っておく
-
 # ---------- 設定 ----------
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
-DEFAULT_PROMPT = (
-    "次の音声/動画を文字起こししてください。"
-    "話し言葉は読みやすい文章に整形してください。"
-    "不要なノイズやフィラーは可能な範囲で削除してください。"
-    "日本語・英語が混在していても、そのまま自然に出力してください。"
-)
+DEFAULT_PROMPT = """
+あなたは「面接動画から面接官の質問のみを抽出する」専用の書記官です。
+入力の音声には応募者（私）の回答は含まれない前提です。以下の指示に厳密に従ってください。
+
+【目的】
+- 面接官の発話のうち「質問」に該当する文だけを抽出し、読みやすく整形して一覧化する。
+- あいづち・フィラー・独り言・連絡事項・説明文は一切記載しない。
+
+【抽出ルール】
+- 質問判定：疑問形、確認・依頼の意図が明確な文（例：「志望理由を教えてください」「具体例はありますか？」）。
+- 除外：あいづち/フィラー（はい、うん、えっと、そうですね、なるほど 等）、雑談挨拶、案内・段取り、独り言、ノイズ。
+- 連続する細かい追い質問は1つの質問ブロックに統合（例：「きっかけは？」「その背景は？」→「きっかけと背景を教えてください」に集約）。
+- 重複や言い換えは代表表現に正規化して1件に集約。
+- 日本語の自然な文体に整形。英語は日本語訳＋原語併記（例：生成AI（Generative AI））。
+- 不確かな箇所は末尾に「(?)」を付ける。無理に補完しない。
+
+【出力（Markdownのみ）】
+## 面接官の質問一覧
+- **[HH:MM:SS] 正規化後の質問文。**｜意図: <志望動機/経験深掘り/技術理解/チームワーク/リーダーシップ/ガクチカ/キャリア展望/逆質問 から最大2つ>｜種類: <行動事例/意見・価値観/技術知識/経験説明/ケース・仮説>｜難度: <S/A/B>
+
+## まとめ（短文）
+- 主な論点（最大3件）
+- 技術寄り/人物寄りの所感（1文）
+- 想定される深掘り方向（最大3件）
+
+【品質要件】
+- タイムスタンプは質問が始まる時点を目安（±3秒以内）。不明なら近傍で可。
+- 原文に不要語が含まれていても、出力は「質問のみ」とする。
+"""
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 
 # ---------- クライアント ----------
@@ -103,11 +127,12 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 def _which_ffmpeg() -> Optional[str]:
-    # .env の明示設定を優先
+    # .env の明示指定を優先
     for key in ("FFMPEG_BIN", "FFMPEG_PATH"):
         p = os.environ.get(key)
         if p and os.path.exists(p):
             return p
+    # Windows/Unix 共通で PATH 検索
     from shutil import which
     for cmd in ("ffmpeg", "ffmpeg.exe"):
         p = which(cmd)
@@ -117,17 +142,30 @@ def _which_ffmpeg() -> Optional[str]:
 
 def _sanitize_tmp_filename(name: str) -> str:
     base = os.path.basename(name)
-    base = re.sub(r"[^\w.\-]+", "_", base)  # 日本語や空白を安全名に置換
+    base = re.sub(r"[^\w.\-]+", "_", base)  # 日本語や空白を安全名に
     return base or "audio"
 
-def extract_audio_ffmpeg(input_path: str, ar: int = 16000, ac: int = 1, abr: str = "64k") -> Tuple[str, bool]:
-    """動画から音声のみ抽出（m4a/mono/16kHz/64kbps）。戻り値: (出力パス, 作成したか)"""
+def extract_audio_ffmpeg(input_path: str,
+                         ar: int = 16000,
+                         ac: int = 1,
+                         abr: str = "64k") -> Tuple[str, bool]:
+    """
+    動画ファイルから音声のみを m4a(LC-AAC) で抽出。
+    戻り値: (出力パス, 作成したかどうか)
+    """
     ff = _which_ffmpeg()
     if not ff:
-        raise RuntimeError("ffmpeg が見つかりません。PATH を通すか、.env に FFMPEG_BIN を指定してください。")
+        raise RuntimeError("ffmpeg が見つかりません。インストールして PATH を通すか、.env に FFMPEG_BIN を指定してください。")
+
     base = _sanitize_tmp_filename(os.path.basename(input_path))
     out_path = str((AUDIO_DIR / f"{base}.m4a").resolve())
-    cmd = [ff, "-y", "-i", input_path, "-vn", "-ac", str(ac), "-ar", str(ar), "-b:a", abr, out_path]
+
+    # -vn: 映像無効, -ac: mono, -ar: 16kHz, -b:a: 音声ビットレート
+    cmd = [
+        ff, "-y", "-i", input_path,
+        "-vn", "-ac", str(ac), "-ar", str(ar), "-b:a", abr,
+        out_path,
+    ]
     logger.info("extract audio via ffmpeg: %s", " ".join(cmd))
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -141,7 +179,8 @@ def extract_audio_ffmpeg(input_path: str, ar: int = 16000, ac: int = 1, abr: str
 def upload_and_wait_ready(client: genai.Client, file_path: str):
     base = os.path.basename(file_path)
     logger.info("uploading file via path: %s", base)
-    uploaded = client.files.upload(file=file_path)  # パス文字列でOK
+
+    uploaded = client.files.upload(file=file_path)  # パス渡しでOK
     logger.info("uploaded: name=%s state=%s", getattr(uploaded, "name", None), getattr(uploaded.state, "name", None))
 
     max_wait_s = 600
@@ -163,17 +202,31 @@ def upload_and_wait_ready(client: genai.Client, file_path: str):
 
 # ---------- セーフティ設定 ----------
 def _safety_settings():
+    # v1beta の有効カテゴリ名を使用
     return [
-        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,        threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,         threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,  threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,  threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
     ]
 
 # ---------- 生成（リトライ＋フォールバック） ----------
 def _generate_with_retry(client, model, prompt, uploaded):
-    backoffs = [2, 4, 8]
+    backoffs = [2, 4, 8]  # 秒
     try_models = [model, "gemini-1.5-pro", "gemini-1.5-flash-8b"]
+
     last_err = None
     for m in try_models:
         for i, sec in enumerate([0] + backoffs):
@@ -199,14 +252,16 @@ def _generate_with_retry(client, model, prompt, uploaded):
     raise last_err
 
 # ---------- 文字起こし本体 ----------
-def transcribe_with_gemini(file_path: str, prompt: Optional[str] = None, model: Optional[str] = None, audio_first: bool = False) -> str:
+def transcribe_with_gemini(file_path: str, prompt: Optional[str] = None,
+                           model: Optional[str] = None, audio_first: bool = False) -> str:
     client = _get_client()
-    model  = model or GEMINI_MODEL
+    model = model or GEMINI_MODEL
     prompt = prompt or DEFAULT_PROMPT
 
     tmp_audio = None
-    created  = False
+    created = False
     try:
+        # 動画なら音声抽出（CLI: --audio-first で強制 / Web: 拡張子が動画なら自動）
         if audio_first or _is_video(file_path):
             tmp_audio, created = extract_audio_ffmpeg(file_path)
             src = tmp_audio
@@ -216,6 +271,7 @@ def transcribe_with_gemini(file_path: str, prompt: Optional[str] = None, model: 
 
         uploaded = upload_and_wait_ready(client, src)
         logger.info("start generate: model=%s file=%s", model, getattr(uploaded, "name", None))
+
         resp = _generate_with_retry(client, model, prompt, uploaded)
         logger.info("done generate")
 
@@ -227,6 +283,7 @@ def transcribe_with_gemini(file_path: str, prompt: Optional[str] = None, model: 
                 text = ""
         return text or "[No transcription text returned]"
     finally:
+        # 抽出音声のクリーンアップ（残したいなら消さない運用に変更可）
         if created and tmp_audio and os.path.exists(tmp_audio):
             try:
                 os.remove(tmp_audio)
@@ -239,19 +296,15 @@ def _cli():
     parser = argparse.ArgumentParser(description="Google AI Studio (Gemini) 音声/動画 文字起こし CLI")
     parser.add_argument("--file", required=True, help="音声/動画ファイル (mp3, wav, m4a, mp4, mov, webm, mkv, aac, flac, ogg)")
     parser.add_argument("--prompt", default=None, help="整形指示（未指定でデフォルト）")
-    parser.add_argument("--model",  default=None, help=f"使用モデル（未指定で {GEMINI_MODEL}）")
+    parser.add_argument("--model", default=None, help=f"使用モデル（未指定で {GEMINI_MODEL}）")
     parser.add_argument("--audio-first", action="store_true", help="動画は先に音声抽出してから解析（推奨）")
-    parser.add_argument("--out", default=None, help="出力テキストファイル（未指定なら ./outputs/transcripts/<元名>.txt）")
     args = parser.parse_args()
 
     text = transcribe_with_gemini(args.file, prompt=args.prompt, model=args.model, audio_first=args.audio_first)
 
-    out_path = args.out
-    if not out_path:
-        stem = Path(args.file).stem
-        safe_stem = _sanitize_tmp_filename(stem)
-        out_path = str((TRANS_DIR / f"{safe_stem}.txt").resolve())
-
+    # ./outputs/transcripts/<元ファイル名>.txt に保存
+    safe_stem = _sanitize_tmp_filename(Path(args.file).stem)
+    out_path = (TRANS_DIR / f"{safe_stem}.txt").resolve()
     with io.open(out_path, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"[OK] 書き出し: {out_path}")
@@ -260,7 +313,7 @@ def _cli():
 app = FastAPI(
     title="Gemini Transcription Demo",
     description="Google AI Studio (Gemini) を使った簡易文字起こしWebアプリ（動画は自動で音声抽出）",
-    version="1.0.0",
+    version="0.8.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -270,17 +323,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# /web 配下に静的ファイルをマウント（CSS/JSを増やす場合もOK）
-app.mount("/web", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+UI_PATH = SCRIPT_DIR / "ui.html"
 
-# ルートは web/index.html を返す
-@app.get("/", response_class=FileResponse)
-def root():
-    index_path = WEB_DIR / "index.html"
-    if not index_path.exists():
-        # ファイルが無い場合の導線
-        return PlainTextResponse("UIファイルがありません。web/index.html を作成してください。", status_code=500)
-    return FileResponse(index_path)
+@app.get("/", response_class=HTMLResponse)
+def index():
+    if UI_PATH.exists():
+        return FileResponse(str(UI_PATH))
+    return HTMLResponse("<h1>ui.html が見つかりません</h1>", status_code=500)
 
 @app.get("/healthz", response_class=JSONResponse)
 def healthz():
@@ -294,14 +343,14 @@ def healthz():
 async def transcribe_endpoint(
     file: UploadFile = File(...),
     prompt: Optional[str] = Form(None),
-    model:  Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
 ):
     if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
         raise HTTPException(status_code=500, detail="環境変数 GOOGLE_API_KEY/GEMINI_API_KEY が未設定です。")
 
     tmp_path = None
     try:
-        suffix  = os.path.splitext(file.filename or "")[1] or ""
+        suffix = os.path.splitext(file.filename or "")[1] or ""
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="空ファイルです。")
@@ -312,6 +361,7 @@ async def transcribe_endpoint(
 
         logger.info("web transcription start: name=%s size=%.2fMB", file.filename, len(content)/1024/1024)
 
+        # Web は拡張子で動画判定 → 動画なら自動抽出
         text = transcribe_with_gemini(
             tmp_path,
             prompt=prompt or DEFAULT_PROMPT,
@@ -319,9 +369,9 @@ async def transcribe_endpoint(
             audio_first=_is_video(file.filename or ""),
         )
 
-        # 出力保存（./outputs/transcripts/<元ファイル名>.txt）
+        # 文字起こし結果を ./outputs/transcripts/<元ファイル名>.txt に保存
         safe_stem = _sanitize_tmp_filename(Path(file.filename or "uploaded").stem)
-        out_path  = (TRANS_DIR / f"{safe_stem}.txt").resolve()
+        out_path = (TRANS_DIR / f"{safe_stem}.txt").resolve()
         with io.open(out_path, "w", encoding="utf-8") as f:
             f.write(text)
         logger.info("saved transcript to: %s", out_path)
