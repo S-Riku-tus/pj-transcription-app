@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"/>
+  <title>Gemini Transcription Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --card: #ffffff;
+      --border: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --accent: #111827;
+      --radius: 14px;
+      --gap: 16px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--bg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Noto Sans JP", Meiryo, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: #fff;
+    }
+    header h1 { margin: 0; font-size: 18px; }
+
+    /* 2カラムレイアウト */
+    .wrap {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr; /* 左右半分 */
+      gap: var(--gap);
+      padding: 16px;
+      height: calc(100vh - 60px); /* ヘッダ分を引く(おおよそ) */
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.05);
+      display: flex;
+      flex-direction: column;
+      min-height: 0; /* overflow:auto を使う親で必要 */
+    }
+
+    /* 左: 設定フォーム（縦スクロール可、サイズ固定） */
+    .left {
+      padding: 18px;
+      overflow: auto;   /* コンテナ内スクロール */
+    }
+
+    .left label { display:block; margin: 12px 0 6px; font-weight: 600; }
+    .left input[type="file"],
+    .left textarea,
+    .left input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .left textarea { resize: vertical; min-height: 120px; }
+
+    .btn {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:hover { opacity: .9; }
+    .hint { color: var(--muted); font-size: 12px; }
+
+    /* 右: 結果パネル（固定サイズ＋スクロール） */
+    .right {
+      padding: 0;
+      overflow: hidden; /* 内側でスクロール領域を作る */
+    }
+    .right .title {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+    }
+    .right .content {
+      padding: 16px;
+      height: calc(100% - 50px); /* タイトルの高さ分を差し引く */
+      overflow: auto;            /* 結果はここでスクロール */
+      white-space: pre-wrap;
+    }
+    .muted { color: var(--muted); }
+
+    /* スマホ等で縦並びにフォールバック */
+    @media (max-width: 900px) {
+      .wrap { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Google AI Studio (Gemini) 文字起こし</h1>
+  </header>
+
+  <main class="wrap">
+    <!-- 左：設定 -->
+    <section class="card left">
+      <form id="form" method="post" enctype="multipart/form-data" action="/transcribe">
+        <label>音声/動画ファイル</label>
+        <input name="file" type="file" accept=".mp3,.wav,.m4a,.mp4,.mov,.webm,.mkv,.aac,.flac,.ogg" required />
+
+        <label>プロンプト（任意）</label>
+        <textarea name="prompt" rows="6" placeholder="整形・要約・言語指定などがあれば書いてください。未指定はデフォルト指示。"></textarea>
+        <div class="hint">未指定の場合は、デフォルトの整形プロンプトを使用します。</div>
+
+        <label>モデル（任意）</label>
+        <input name="model" type="text" placeholder="例: gemini-2.5-pro" />
+
+        <div style="margin-top: 16px;">
+          <button class="btn" type="submit">文字起こしする</button>
+        </div>
+      </form>
+      <div style="margin-top:12px" id="status" class="muted"></div>
+    </section>
+
+    <!-- 右：結果 -->
+    <section class="card right">
+      <div class="title">結果</div>
+      <div class="content" id="out"><span class="muted">ここに文字起こし結果が表示されます。</span></div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById('form');
+    const out  = document.getElementById('out');
+    const statusBox = document.getElementById('status');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusBox.textContent = '処理中...（アップロード→解析。動画は音声抽出してから解析します）';
+      out.textContent = '処理中...';
+
+      const fd = new FormData(form);
+      try {
+        const res  = await fetch('/transcribe', { method: 'POST', body: fd });
+        const text = await res.text();
+        if (!res.ok) {
+          out.textContent = '[ERROR] ' + text;
+        } else {
+          out.textContent = text;
+        }
+      } catch (err) {
+        out.textContent = '[ERROR] ' + (err?.message || String(err));
+      } finally {
+        statusBox.textContent = '';
+      }
+    });
+  </script>
+</body>
+</html>
