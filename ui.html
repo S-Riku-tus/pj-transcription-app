@@ -4,23 +4,33 @@
   <meta charset="utf-8"/>
   <title>Gemini Transcription Demo</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
   <!-- Markdownパーサ & XSS対策 -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" crossorigin="anonymous"></script>
+
   <style>
     :root { --gap: 16px; }
     * { box-sizing: border-box; }
+
     body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
-      margin: 0; padding: 24px; background: #f7f7f8;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+                   "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #f7f7f8;
     }
+
     h1 { margin: 0 0 16px; font-size: 20px; }
+
+    /* レイアウト：左1/右2 の2カラム。高さは画面にフィットし内部スクロール */
     .grid {
       display: grid;
-      grid-template-columns: minmax(320px, 1fr) 2fr; /* 左1 右2 */
+      grid-template-columns: minmax(320px, 1fr) 2fr;
       gap: var(--gap);
-      height: calc(100vh - 48px); /* 画面高さから上下余白を引いて固定 */
+      height: calc(100vh - 48px);
     }
+
     .card {
       background: #fff;
       border: 1px solid #e5e7eb;
@@ -29,40 +39,87 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
+      min-height: 0; /* 子要素のoverflowと併用するため */
     }
+
     .card-header {
       padding: 14px 16px;
       border-bottom: 1px solid #f1f5f9;
       background: #fafafa;
       font-weight: 700;
     }
+
     .card-body {
       padding: 16px;
-      overflow: auto;      /* ← スクロール */
-      flex: 1 1 auto;      /* ← 固定高さの中で伸縮 */
+      overflow: auto;      /* 固定領域内で縦横スクロール */
+      flex: 1 1 auto;
+      min-height: 0;
     }
+
     label { display:block; margin: 10px 0 6px; font-weight: 600; }
+
     input[type="file"], textarea, input[type="text"] {
-      width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; background:#fff;
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      background:#fff;
     }
+
     textarea { min-height: 120px; }
+
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+
     button {
-      padding: 10px 16px; border: none; border-radius: 10px; background: #111827; color: white; font-weight: 600; cursor: pointer;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 10px;
+      background: #111827;
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
     }
+
     button:hover { opacity: .92; }
+
     .hint { color: #6b7280; font-size: 12px; margin-top: 4px; }
 
-    /* 出力レンダリング領域（Markdown用） */
+    /* ====== Markdown 表示領域 ====== */
     .result { line-height: 1.6; }
     .result h2, .result h3 { margin: 0.8em 0 0.4em; }
-    .result ul { padding-left: 1.2em; }
+    .result ul, .result ol { padding-left: 1.2em; margin: 0.6em 0; }
     .result code, .result pre {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
-    .result pre { padding: 10px; background: #fbfbfb; border: 1px solid #eee; border-radius: 6px; overflow: auto; }
+    .result pre {
+      padding: 10px;
+      background: #fbfbfb;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      overflow: auto;
+    }
+
+    /* ▼ リンクの下線を完全に無効化（色も本文に合わせる） */
+    .result a,
+    .result a:visited,
+    .result a:hover,
+    .result a:active,
+    .result a:focus {
+      text-decoration: none !important;
+      color: inherit;
+      outline: none;
+    }
+
+    /* 任意：リンクと分かるようにホバーで軽く背景 */
+    .result a:hover { background: #f5f5f5; border-radius: 4px; }
+
+    /* スマホ時は縦積み */
+    @media (max-width: 880px) {
+      .grid { grid-template-columns: 1fr; height: auto; }
+    }
   </style>
 </head>
+
 <body>
   <h1>Google AI Studio (Gemini) 文字起こし</h1>
 
@@ -73,10 +130,13 @@
       <div class="card-body">
         <form id="form" method="post" enctype="multipart/form-data" action="/transcribe">
           <label>音声/動画ファイル</label>
-          <input name="file" type="file" accept=".mp3,.wav,.m4a,.mp4,.mov,.webm,.mkv,.aac,.flac,.ogg" required />
+          <input name="file" type="file"
+                 accept=".mp3,.wav,.m4a,.mp4,.mov,.webm,.mkv,.aac,.flac,.ogg"
+                 required />
 
           <label>プロンプト（任意）</label>
-          <textarea name="prompt" rows="5" placeholder="整形・要約・言語指定などがあれば書いてください。未指定はデフォルト。"></textarea>
+          <textarea name="prompt" rows="5"
+            placeholder="整形・要約・言語指定などがあれば書いてください。未指定はデフォルト。"></textarea>
           <div class="hint">※ 面接官の質問のみ抽出するテンプレをデフォルト設定済み</div>
 
           <div class="row">
@@ -111,9 +171,12 @@
 
     // Markdown → 安全なHTML
     function renderMarkdown(md) {
-      marked.setOptions({ breaks: true });       // 1行改行を <br> 扱い
+      marked.setOptions({
+        breaks: true,       // 改行を <br> として扱う（好みに応じて）
+        gfm: true
+      });
       const html = marked.parse(md || '');
-      return DOMPurify.sanitize(html);           // XSS対策
+      return DOMPurify.sanitize(html); // XSS対策
     }
 
     form.addEventListener('submit', async (e) => {
@@ -128,7 +191,6 @@
         const txt = await res.text();
 
         if (!res.ok) {
-          // サーバエラーはそのままテキスト表示
           out.innerHTML = `<pre>${DOMPurify.sanitize(txt)}</pre>`;
           return;
         }
